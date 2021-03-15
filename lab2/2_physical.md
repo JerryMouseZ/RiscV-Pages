@@ -1,4 +1,39 @@
-# lab2 1/n 物理内存管理
+# lab2 1/n 物理内存探测
+
+操作系统怎样知道物理内存所在的那段物理地址呢？在 RISC-V 中，这个一般是由 bootloader ，即 OpenSBI 来完成的。它来完成对于包括物理内存在内的各外设的扫描，将扫描结果以 DTB(Device Tree Blob) 的格式保存在物理内存中的某个地方。随后 OpenSBI 会将其地址保存在 `a1` 寄存器中，给我们使用。
+
+这个扫描结果描述了所有外设的信息，当中也包括 Qemu 模拟的 RISC-V 计算机中的物理内存。
+
+> 扩展 **Qemu 模拟的 RISC-V virt 计算机中的物理内存**
+>
+> 通过查看[virt.c](https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c)的**virt_memmap[]**的定义，可以了解到 Qemu 模拟的 RISC-V virt 计算机的详细物理内存布局。可以看到，整个物理内存中有不少内存空洞（即含义为**unmapped**的地址空间），也有很多外设特定的地址空间，现在我们看不懂没有关系，后面会慢慢涉及到。目前只需关心最后一块含义为**DRAM**的地址空间，这就是 OS 将要管理的 128MB 的内存空间。
+>
+> | 起始地址   | 终止地址   | 含义                                                  |
+> | :--------- | :--------- | :---------------------------------------------------- |
+> | 0x0        | 0x100      | QEMU VIRT_DEBUG                                       |
+> | 0x100      | 0x1000     | unmapped                                              |
+> | 0x1000     | 0x12000    | QEMU MROM (包括 hard-coded reset vector; device tree) |
+> | 0x12000    | 0x100000   | unmapped                                              |
+> | 0x100000   | 0x101000   | QEMU VIRT_TEST                                        |
+> | 0x101000   | 0x2000000  | unmapped                                              |
+> | 0x2000000  | 0x2010000  | QEMU VIRT_CLINT                                       |
+> | 0x2010000  | 0x3000000  | unmapped                                              |
+> | 0x3000000  | 0x3010000  | QEMU VIRT_PCIE_PIO                                    |
+> | 0x3010000  | 0xc000000  | unmapped                                              |
+> | 0xc000000  | 0x10000000 | QEMU VIRT_PLIC                                        |
+> | 0x10000000 | 0x10000100 | QEMU VIRT_UART0                                       |
+> | 0x10000100 | 0x10001000 | unmapped                                              |
+> | 0x10001000 | 0x10002000 | QEMU VIRT_VIRTIO                                      |
+> | 0x10002000 | 0x20000000 | unmapped                                              |
+> | 0x20000000 | 0x24000000 | QEMU VIRT_FLASH                                       |
+> | 0x24000000 | 0x30000000 | unmapped                                              |
+> | 0x30000000 | 0x40000000 | QEMU VIRT_PCIE_ECAM                                   |
+> | 0x40000000 | 0x80000000 | QEMU VIRT_PCIE_MMIO                                   |
+> | 0x80000000 | 0x88000000 | DRAM 缺省 128MB，大小可配置                           |
+
+不过为了简单起见，我们并不打算自己去解析这个结果。因为我们知道，Qemu 规定的 DRAM 物理内存的起始物理地址为 `0x80000000` 。而在 Qemu 中，可以使用 `-m` 指定 RAM 的大小，默认是 **128MiB** 。因此，默认的 DRAM 物理内存地址范围就是 `[0x80000000,0x88000000)` 。我们直接将 DRAM 物理内存结束地址硬编码到内核中：
+
+### 物理内存管理
 
 在管理虚拟内存之前，我们首先需要能够管理物理内存，毕竟所有虚拟内存页都要对应到物理内存页才能使用。
 
@@ -10,7 +45,7 @@
 - 给出n，尝试分配n个物理页，可以返回一个起始地址和连续的物理页数目，也可能分配一些零散的物理页，返回一个连起来的链表。
 - 给出起始地址和n，释放n个连续的物理页
 
-在`kern_init()`里，我们调用一个新函数：`pmm_init()`
+在`kern_init()`里，我们调用一个新函数：`pmm_init()`进行物理内存管理的初始化。`kern/mm/pmm.h`中定义了一个通用的分配算法的函数列表，用`pmm_manager`表示，而`pmm_init()`函数首先选择其中一个分配算法作为当前使用的物理内存管理器，然后用`page_init()`函数给物理内存页初始化。
 
 ```c
 // kern/init/init.c
@@ -57,7 +92,7 @@ void pmm_init(void) {
 
 `check_alloc_page()`是对物理内存分配功能的一个测试。我们重点关注`page_init()`
 
-我们在lab2增加了一些功能，方便我们编程：
+我们在lab2增加了一些功能，方便我们编程，其中list.h中链表结构的操作与我们需要填写的代码息息相关：
 
 - kern/sync/sync.h：为确保内存管理修改相关数据时不被中断打断，提供两个功能，一个是保存 sstatus寄存器中的中断使能位(SIE)信息并屏蔽中断的功能，另一个是根据保存的中断使能位信息来使能中断的功能
 - libs/list.h：定义了通用双向链表结构以及相关的查找、插入等基本操作，这是建立基于链表方法的物理内存管理（以及其他内核功能）的基础。其他有类似双向链表需求的内核功能模块可直接使用 list.h 中定义的函数。
@@ -121,27 +156,11 @@ static inline void __list_del(list_entry_t *prev, list_entry_t *next) __attribut
 
 ```
 
-看起来`list.h`里面定义的`list_entry`并没有数据域，但是，如果我们把`list_entry`作为其他结构体的成员，就可以利用C语言结构体内存连续布局的特点，从``list_entry`的地址获得它所在的上一级结构体。
+看起来`list.h`里面定义的`list_entry`并没有数据域，但是，如果我们把`list_entry`作为其他结构体的成员，就可以利用C语言结构体内存连续布局的特点，从`list_entry`的地址获得它所在的上一级结构体。
 
-于是我们定义了可以连成链表的`Page`结构体和一系列对它做操作的宏。这个结构体用来管理物理内存。
+于是我们定义了可以连成链表的`Page`结构体和一系列对它做操作的宏。这个结构体用来管理物理页面。它包含了映射此物理页的虚拟页的个数，描述物理页属性的flags和连接各个page的`page_link`属性。其中flags目前用到了两个bit表示页面属性，bit 0表示此页面是否被保留不能用于分配，如内核使用的页面，bit 1表示页面是否free，只有该属性为1时才能被分配。
 
 ```c
-// libs/defs.h
-
-/* Return the offset of 'member' relative to the beginning of a struct type */
-#define offsetof(type, member)                                      \
-    ((size_t)(&((type *)0)->member))
-
-/* *
- * to_struct - get the struct from a ptr
- * @ptr:    a struct pointer of member
- * @type:   the type of the struct this is embedded in
- * @member: the name of the member within the struct
- * */
-#define to_struct(ptr, type, member)                               \
-    ((type *)((char *)(ptr) - offsetof(type, member)))
-
-// kern/mm/memlayout.h
 /* *
  * struct Page - Page descriptor structures. Each Page describes one
  * physical page. In kern/mm/pmm.h, you can find lots of useful functions
@@ -165,16 +184,21 @@ struct Page {
 #define ClearPageProperty(page)     clear_bit(PG_property, &((page)->flags))
 #define PageProperty(page)          test_bit(PG_property, &((page)->flags))
 
-// convert list entry to page
-#define le2page(le, member)                 \
-    to_struct((le), struct Page, member)
-
-/* free_area_t - maintains a doubly linked list to record free (unused) pages */
 typedef struct {
     list_entry_t free_list;         // the list header
     unsigned int nr_free;           // # of free pages in this free list
 } free_area_t;
 
+```
+Page数据结构的成员变量property用来记录某连续内存空闲块的大小（即地址连续的空闲页的个数）。这里需要注意的是用到此成员变量的这个Page比较特殊，是这个连续内存空闲块地址最小的一页（即头一页， Head Page）。
+在初始情况下，也许这个物理内存的空闲物理页都是连续的，这样就形成了一个大的连续内存空闲块。但随着物理页的分配与释放，这个大的连续内存空闲块会分裂为一系列地址不连续的多个小连续内存空闲块，且每个连续内存空闲块内部的物理页是连续的。那么为了有效地管理这些小连续内存空闲块。所有的连续内存空闲块可用一个双向链表管理起来，便于分配和释放，为此定义了一个`free_area_t`数据结构，包含了一个`list_entry`结构的双向链表指针和记录当前空闲页的个数的无符号整型变量`nr_free`。其中的链表指针指向了空闲的物理页。
+
+```c
+/* free_area_t - maintains a doubly linked list to record free (unused) pages */
+typedef struct {
+            list_entry_t free_list;                                // the list header
+            unsigned int nr_free;                                 // # of free pages in this free list
+} free_area_t;
 ```
 
 (抄自[rcore tutorial](https://github.com/rcore-os/rCore_tutorial_doc/blob/master/chapter4/part1.md))
@@ -184,41 +208,6 @@ typedef struct {
 这样设计是因为：如果访问其他外设要使用不同的指令（如 x86 单独提供了**in**, **out** 指令来访问不同于内存的**IO**地址空间），会比较麻烦，于是很多 CPU（如 RISC-V，ARM，MIPS 等）通过 MMIO(Memory Mapped I/O) 技术将外设映射到一段物理地址，这样我们访问其他外设就和访问物理内存一样啦！
 
 我们先不管那些外设，来看物理内存。
-
-### 物理内存探测
-
-操作系统怎样知道物理内存所在的那段物理地址呢？在 RISC-V 中，这个一般是由 bootloader ，即 OpenSBI 来完成的。它来完成对于包括物理内存在内的各外设的扫描，将扫描结果以 DTB(Device Tree Blob) 的格式保存在物理内存中的某个地方。随后 OpenSBI 会将其地址保存在 `a1` 寄存器中，给我们使用。
-
-这个扫描结果描述了所有外设的信息，当中也包括 Qemu 模拟的 RISC-V 计算机中的物理内存。
-
-> 扩展 **Qemu 模拟的 RISC-V virt 计算机中的物理内存**
->
-> 通过查看[virt.c](https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c)的**virt_memmap[]**的定义，可以了解到 Qemu 模拟的 RISC-V virt 计算机的详细物理内存布局。可以看到，整个物理内存中有不少内存空洞（即含义为**unmapped**的地址空间），也有很多外设特定的地址空间，现在我们看不懂没有关系，后面会慢慢涉及到。目前只需关心最后一块含义为**DRAM**的地址空间，这就是 OS 将要管理的 128MB 的内存空间。
->
-> | 起始地址   | 终止地址   | 含义                                                  |
-> | :--------- | :--------- | :---------------------------------------------------- |
-> | 0x0        | 0x100      | QEMU VIRT_DEBUG                                       |
-> | 0x100      | 0x1000     | unmapped                                              |
-> | 0x1000     | 0x12000    | QEMU MROM (包括 hard-coded reset vector; device tree) |
-> | 0x12000    | 0x100000   | unmapped                                              |
-> | 0x100000   | 0x101000   | QEMU VIRT_TEST                                        |
-> | 0x101000   | 0x2000000  | unmapped                                              |
-> | 0x2000000  | 0x2010000  | QEMU VIRT_CLINT                                       |
-> | 0x2010000  | 0x3000000  | unmapped                                              |
-> | 0x3000000  | 0x3010000  | QEMU VIRT_PCIE_PIO                                    |
-> | 0x3010000  | 0xc000000  | unmapped                                              |
-> | 0xc000000  | 0x10000000 | QEMU VIRT_PLIC                                        |
-> | 0x10000000 | 0x10000100 | QEMU VIRT_UART0                                       |
-> | 0x10000100 | 0x10001000 | unmapped                                              |
-> | 0x10001000 | 0x10002000 | QEMU VIRT_VIRTIO                                      |
-> | 0x10002000 | 0x20000000 | unmapped                                              |
-> | 0x20000000 | 0x24000000 | QEMU VIRT_FLASH                                       |
-> | 0x24000000 | 0x30000000 | unmapped                                              |
-> | 0x30000000 | 0x40000000 | QEMU VIRT_PCIE_ECAM                                   |
-> | 0x40000000 | 0x80000000 | QEMU VIRT_PCIE_MMIO                                   |
-> | 0x80000000 | 0x88000000 | DRAM 缺省 128MB，大小可配置                           |
-
-不过为了简单起见，我们并不打算自己去解析这个结果。因为我们知道，Qemu 规定的 DRAM 物理内存的起始物理地址为 `0x80000000` 。而在 Qemu 中，可以使用 `-m` 指定 RAM 的大小，默认是 $$128\text{MiB}$$ 。因此，默认的 DRAM 物理内存地址范围就是 `[0x80000000,0x88000000)` 。我们直接将 DRAM 物理内存结束地址硬编码到内核中：
 
 ```c
 // kern/mm/memlayout.h
@@ -244,53 +233,7 @@ typedef struct {
 为了管理物理内存，我们需要在内核里定义一些数据结构，来存储”当前使用了哪些物理页面，哪些物理页面没被使用“这样的信息，使用的是Page结构体。我们将一些Page结构体在内存里排列在内核后面，这要占用一些内存。而摆放这些Page结构体的物理页面，以及内核占用的物理页面，之后都无法再使用了。我们用`page_init()`函数给这些管理物理内存的结构体做初始化。下面是代码
 
 ```c
-// kern/mm/pmm.h
-
-/* *
- * PADDR - takes a kernel virtual address (an address that points above
- * KERNBASE),
- * where the machine's maximum 256MB of physical memory is mapped and returns
- * the
- * corresponding physical address.  It panics if you pass it a non-kernel
- * virtual address.
- * */
-#define PADDR(kva)                                                 \
-    ({                                                             \
-        uintptr_t __m_kva = (uintptr_t)(kva);                      \
-        if (__m_kva < KERNBASE) {                                  \
-            panic("PADDR called with invalid kva %08lx", __m_kva); \
-        }                                                          \
-        __m_kva - va_pa_offset;                                    \
-    })
-
-/* *
- * KADDR - takes a physical address and returns the corresponding kernel virtual
- * address. It panics if you pass an invalid physical address.
- * */
-/*
-#define KADDR(pa)                                                \
-    ({                                                           \
-        uintptr_t __m_pa = (pa);                                 \
-        size_t __m_ppn = PPN(__m_pa);                            \
-        if (__m_ppn >= npage) {                                  \
-            panic("KADDR called with invalid pa %08lx", __m_pa); \
-        }                                                        \
-        (void *)(__m_pa + va_pa_offset);                         \
-    })
-*/
-extern struct Page *pages;
-extern size_t npage;
-
 // kern/mm/pmm.c
-
-// pages指针保存的是第一个Page结构体所在的位置，也可以认为是Page结构体组成的数组的开头
-// 由于C语言的特性，可以把pages作为数组名使用，pages[i]表示顺序排列的第i个结构体
-struct Page *pages;
-size_t npage = 0;
-uint64_t va_pa_offset;
-// memory starts at 0x80000000 in RISC-V
-const size_t nbase = DRAM_BASE / PGSIZE;
-//(npage - nbase)表示物理内存的页数
 
 static void page_init(void) {
     va_pa_offset = PHYSICAL_MEMORY_OFFSET; //硬编码 0xFFFFFFFF40000000
@@ -331,7 +274,7 @@ static void page_init(void) {
 }
 ```
 
-`page_init()`的代码里，我们调用了一个函数`init_memmap()`, 这和我们的另一个结构体`pmm_manager`有关。虽然C语言基本上不支持面向对象，但我们可以用类似面向对象的思路，把”物理内存管理“的功能集中给一个结构体。我们甚至可以让函数指针作为结构体的成员，强行在C语言里支持了”成员函数“。可以看到，我们调用的`init_memmap()`实际上又调用了`pmm_manager`的一个”成员函数“。如果你不熟悉函数指针的用法，可以读一读《The C Programming Language》的相关章节（待补充：第几章第几节？）。
+`page_init()`的代码里，我们调用了一个函数`init_memmap()`, 这和我们的另一个结构体`pmm_manager`有关。虽然C语言基本上不支持面向对象，但我们可以用类似面向对象的思路，把”物理内存管理“的功能集中给一个结构体。我们甚至可以让函数指针作为结构体的成员，强行在C语言里支持了”成员函数“。可以看到，我们调用的`init_memmap()`实际上又调用了`pmm_manager`的一个”成员函数“。
 
 ```c
 // kern/mm/pmm.c
@@ -346,15 +289,6 @@ static void init_memmap(struct Page *base, size_t n) {
 }
 
 // kern/mm/pmm.h
-#ifndef __KERN_MM_PMM_H__
-#define __KERN_MM_PMM_H__
-
-#include <assert.h>
-#include <atomic.h>
-#include <defs.h>
-#include <memlayout.h>
-#include <mmu.h>
-#include <riscv.h>
 
 // pmm_manager is a physical memory management class. A special pmm manager -
 // XXX_pmm_manager
@@ -378,18 +312,7 @@ struct pmm_manager {
     void (*check)(void);            // 测试正确性
 };
 
-extern const struct pmm_manager *pmm_manager;
-
-void pmm_init(void);
-
-struct Page *alloc_pages(size_t n);
-void free_pages(struct Page *base, size_t n);
-size_t nr_free_pages(void); // number of free pages
-
-#define alloc_page() alloc_pages(1)
-#define free_page(page) free_pages(page, 1)
 ```
-
 pmm_manager提供了各种接口：分配页面，释放页面，查看当前空闲页面数。但是我们好像始终没看见pmm_manager内部对这些接口的实现，那些接口只是作为函数指针，作为pmm_manager的一部分，我们需要把那些函数指针变量赋值为真正的函数名称。
 
 还记得最早我们在`pmm_init()`里首先调用了`init_pmm_manager()`, 在这里面我们把pmm_manager的指针赋值成`&default_pmm_manager`， 看起来我们在这里实现了那些接口。
